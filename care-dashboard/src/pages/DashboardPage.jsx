@@ -1,8 +1,6 @@
-import DashboardPage from "./pages/dashboardPage";
 import { useState, useEffect } from "react";
 import { getDashboard } from "../services/api";
 import { useNavigate } from "react-router-dom";
-
 
 const DEFAULT_STATS = {
   calls_today: 0,

@@ -21,28 +21,71 @@ CHUNK_SECONDS = 25
 # ════════════════════════════════════════════════════════
 
 def fetch_from_google_drive(url: str, dest_dir: str) -> str:
-    if "/file/d/" in url:
-        file_id = url.split("/file/d/")[1].split("/")[0]
+    """
+    Download from Google Drive shareable link.
+    Handles all URL formats including ?usp=drive_link suffix.
+    """
+    import re as _re
+    # Extract file ID — handle all Drive URL formats
+    file_id = None
+
+    # Format: /file/d/FILE_ID/view or /file/d/FILE_ID?...
+    m = _re.search(r"/file/d/([a-zA-Z0-9_-]+)", url)
+    if m:
+        file_id = m.group(1)
+    # Format: ?id=FILE_ID or &id=FILE_ID
     elif "id=" in url:
-        file_id = url.split("id=")[1].split("&")[0]
+        m = _re.search(r"[?&]id=([a-zA-Z0-9_-]+)", url)
+        if m: file_id = m.group(1)
+    # Format: /open?id=FILE_ID
+    elif "/open" in url:
+        m = _re.search(r"id=([a-zA-Z0-9_-]+)", url)
+        if m: file_id = m.group(1)
     else:
-        file_id = url.strip()
+        # Assume raw file ID was passed
+        file_id = url.strip().split("?")[0].split("/")[-1]
+
+    if not file_id:
+        raise RuntimeError(f"Could not extract Google Drive file ID from URL: {url}")
+
+    print(f"[GDRIVE] File ID: {file_id}")
+
+    # Try direct download URL
     dl = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
-    print(f"[GDRIVE] Downloading {file_id}...")
     s = requests.Session()
+    s.headers.update({"User-Agent": "Mozilla/5.0"})
+
     r = s.get(dl, stream=True, timeout=120)
+
+    # Handle Google virus scan warning for large files
     for k, v in r.cookies.items():
-        if "download_warning" in k:
-            r = s.get(dl + f"&confirm={v}", stream=True, timeout=120)
+        if "download_warning" in k or "confirm" in k.lower():
+            dl2 = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={v}"
+            r = s.get(dl2, stream=True, timeout=120)
             break
-    dest = os.path.join(dest_dir, f"gdrive_{file_id}.mp3")
+
+    # Detect filename from headers
+    content_disp = r.headers.get("Content-Disposition", "")
+    fname = f"gdrive_{file_id}.mp3"
+    if "filename=" in content_disp:
+        fname_match = _re.search(r"filename[*]?=[\"']?([^\"';]+)", content_disp)
+        if fname_match:
+            fname = fname_match.group(1).strip().strip('"').strip("'")
+
+    dest = os.path.join(dest_dir, fname)
+    total = 0
     with open(dest, "wb") as f:
         for chunk in r.iter_content(32768):
-            if chunk: f.write(chunk)
-    size = os.path.getsize(dest)
-    if size < 1000:
-        raise RuntimeError(f"Google Drive download failed — file too small ({size} bytes). Share as 'Anyone with link'.")
-    print(f"[GDRIVE] Done → {size//1024}KB")
+            if chunk:
+                f.write(chunk)
+                total += len(chunk)
+
+    if total < 1000:
+        raise RuntimeError(
+            f"Google Drive download failed — only {total} bytes received. "
+            f"Make sure the file is shared as 'Anyone with link can view'."
+        )
+    print(f"[GDRIVE] Done → {dest} ({total//1024}KB)")
     return dest
 
 
@@ -138,18 +181,32 @@ def _transcribe_chunk(chunk_path: str, api_key: str, idx: int):
 
 
 def _extract_agent_only(full_transcript: str):
+    """
+    Returns (agent_only_for_scoring, full_for_display)
+    Scoring uses agent lines only — display shows full transcript.
+    """
     lines = full_transcript.split("\n")
-    agent_lines, full_lines = [], []
+    agent_lines = []
+
     for line in lines:
         line = line.strip()
-        if not line: continue
-        full_lines.append(line)
+        if not line:
+            continue
         upper = line.upper()
-        if upper.startswith("AGENT:") or upper.startswith("AGENT :"):
+        # Explicitly agent lines
+        if any(upper.startswith(p) for p in ["AGENT:", "AGENT :"]):
+            # Strip the AGENT: prefix for cleaner scoring
+            text = line.split(":", 1)[1].strip() if ":" in line else line
+            agent_lines.append(f"AGENT: {text}")
+        # Explicitly skip customer lines
+        elif any(upper.startswith(p) for p in ["CUSTOMER:", "CUSTOMER :", "CALLER:", "CLIENT:", "BORROWER:"]):
+            continue  # skip customer turns for scoring
+        else:
+            # Untagged — include (single speaker recording or unclear)
             agent_lines.append(line)
-        elif not any(upper.startswith(p) for p in ["CUSTOMER:", "CUSTOMER :", "CALLER:", "CLIENT:"]):
-            agent_lines.append(line)
+
     agent = "\n".join(agent_lines) if agent_lines else full_transcript
+    print(f"[BIFURCATION] Full: {len(full_transcript)} chars | Agent-only: {len(agent)} chars")
     return agent, full_transcript
 
 
@@ -257,35 +314,44 @@ def score_transcript(agent_transcript: str) -> dict:
             raise RuntimeError(f"Sarvam LLM {r.status_code}: {r.text}")
         return r.json()["choices"][0]["message"]["content"]
 
-    # Attempt 1: Very direct prompt, temperature=0
+    # Attempt 1: Direct JSON prompt, temperature=0
     raw = call_llm([
-        {"role": "system", "content": "You are a JSON generator. Output ONLY raw JSON. No thinking. No explanation. Start your response with { immediately."},
+        {"role": "system", "content": "You output ONLY raw JSON. No thinking tags. No explanation. Start with { immediately."},
         {"role": "user", "content": prompt}
     ], temp=0.0)
 
-    print(f"[SCORE] Raw ({len(raw)} chars): {raw[:60]}")
+    print(f"[SCORE] Attempt 1 ({len(raw)} chars): {raw[:80]}")
     js = _clean_json(raw)
 
-    # Attempt 2: If still no valid JSON, try simpler prompt
+    # Attempt 2: Keep conversation — ask it to now output just the JSON
     if not js or not _is_valid_json(js):
-        print("[SCORE] Attempt 1 failed, trying simplified prompt...")
-        simple_prompt = f"""Score this agent transcript using collections QA framework. Output ONLY JSON.
-
-TRANSCRIPT: {agent_transcript[:4000]}
-
-Output this JSON with actual scores (replace 0s with real scores 0-3 or 0-2):
-{{"scores":{{"A1_opening":0,"A2_case_knowledge":0,"A3_probing":0,"A4_negotiation":0,"A5_commitment_ptp":0,"A6_closing":0,"A7_professionalism":0,"A8_call_handling":0,"A9_troubleshooting":0}},"total_score":0,"total_score_pct":0,"grade":"Poor","critical_fail":false,"ptp_detected":false,"ptp_amount":null,"ptp_date":null,"ptp_mode":null,"agent_sentiment":"neutral","sentiment_notes":"tone note","compliance_flags":["NONE"],"summary":"summary here","key_issues":["issue"],"strengths":["strength"],"coaching_tip":"tip"}}"""
-
+        print("[SCORE] Attempt 2 — asking for JSON conversion...")
         raw2 = call_llm([
-            {"role": "system", "content": "Output ONLY JSON starting with {. No other text whatsoever."},
-            {"role": "user", "content": simple_prompt}
+            {"role": "system", "content": "You output ONLY raw JSON starting with {. No thinking. No text before or after the JSON."},
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": raw},  # include its previous response
+            {"role": "user", "content": "Now output ONLY the JSON object. Start with { right now:"}
         ], temp=0.0)
-
-        print(f"[SCORE] Attempt 2 raw ({len(raw2)} chars): {raw2[:60]}")
+        print(f"[SCORE] Attempt 2 ({len(raw2)} chars): {raw2[:80]}")
         js = _clean_json(raw2)
 
+    # Attempt 3: Completely fresh minimal prompt
     if not js or not _is_valid_json(js):
-        raise ValueError(f"Could not extract valid JSON after 2 attempts. Last raw: {raw[:200]}")
+        print("[SCORE] Attempt 3 — minimal prompt...")
+        mini = f"""Transcript: {agent_transcript[:3000]}
+
+Fill in real scores and return ONLY this JSON:
+{{"scores":{{"A1_opening":0,"A2_case_knowledge":0,"A3_probing":0,"A4_negotiation":0,"A5_commitment_ptp":0,"A6_closing":0,"A7_professionalism":0,"A8_call_handling":0,"A9_troubleshooting":0}},"total_score":0,"total_score_pct":0,"grade":"Poor","critical_fail":false,"ptp_detected":false,"ptp_amount":null,"ptp_date":null,"ptp_mode":null,"agent_sentiment":"neutral","sentiment_notes":"note","compliance_flags":["NONE"],"summary":"summary","key_issues":["issue"],"strengths":["strength"],"coaching_tip":"tip"}}"""
+
+        raw3 = call_llm([
+            {"role": "system", "content": "Return ONLY the filled JSON. Start with {{"},
+            {"role": "user", "content": mini}
+        ], temp=0.0)
+        print(f"[SCORE] Attempt 3 ({len(raw3)} chars): {raw3[:80]}")
+        js = _clean_json(raw3)
+
+    if not js or not _is_valid_json(js):
+        raise ValueError(f"Could not extract JSON after 3 attempts. Raw sample: {raw[:300]}")
 
     result = json.loads(js)
 

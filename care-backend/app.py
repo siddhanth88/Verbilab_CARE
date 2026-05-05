@@ -447,7 +447,7 @@ if __name__ == "__main__":
     print(f"   DB      : {os.path.join(os.path.dirname(__file__), 'care.db')}")
     print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
     print(f"   Auth    : {'JWT enabled' if AUTH_AVAILABLE else 'disabled (pip install pyjwt bcrypt)'}")
-    print(f"   Health  : http://localhost:5000/api/health\n")
+    print(f"   Health  : /api/health")
 
 # ════════════════════════════════════════════════════════
 # Entry point

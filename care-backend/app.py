@@ -18,13 +18,7 @@ load_dotenv()
 
 app = Flask(__name__)
 # Allow requests from Netlify frontend + localhost
-CORS(app, 
-     supports_credentials=True,
-     origins=[
-         "http://localhost:5173",
-         "http://localhost:3000", 
-         os.getenv("FRONTEND_URL", "*"),
-     ])
+CORS(app, origins=["https://verbilab-care.netlify.app"])
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)

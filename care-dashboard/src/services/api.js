@@ -1,41 +1,63 @@
-// Uses VITE_API_URL env var in production, falls back to localhost for dev
+// Use env OR fallback to Railway
 const API_ROOT =
-  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_API_URL?.trim() ||
   "https://verbilabcare-production.up.railway.app";
+
+console.log("🌐 API ROOT =", API_ROOT);
 
 const BASE = API_ROOT;
 const AUTH = `${API_ROOT}/api/auth`;
 
-if (!API_ROOT) {
-  console.error("❌ VITE_API_URL is NOT set");
-}
 function getToken() {
   return localStorage.getItem("care_token") || "";
 }
 
 function authHeaders() {
   return {
-    "Authorization": `Bearer ${getToken()}`,
+    Authorization: `Bearer ${getToken()}`,
     "Content-Type": "application/json",
   };
 }
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
+// Safe fetch wrapper (THIS IS KEY 🔥)
+async function safeFetch(url, options = {}) {
+  try {
+    const res = await fetch(url, options);
+
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+
+    return data;
+  } catch (err) {
+    console.error("❌ API ERROR:", err);
+    throw new Error("Cannot reach backend. Check API / CORS / URL.");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────────────────────────
+
 export async function login(email, password) {
-  const res = await fetch(`${AUTH}/login`, {
+  return safeFetch(`${AUTH}/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Login failed");
-  return data;
 }
 
 export async function getMe() {
-  const res = await fetch(`${AUTH}/me`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Not authenticated");
-  return res.json();
+  return safeFetch(`${AUTH}/me`, {
+    headers: authHeaders(),
+  });
 }
 
 export function logout() {
@@ -43,106 +65,129 @@ export function logout() {
   localStorage.removeItem("care_user");
 }
 
-// ── Calls ─────────────────────────────────────────────────────────────────────
-export async function uploadCall(file, metadata = {}, onProgress) {
-  return new Promise((resolve, reject) => {
-    const formData = new FormData();
-    formData.append("file", file);
-    Object.entries(metadata).forEach(([k, v]) => { if (v) formData.append(k, v); });
-
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${BASE}/calls/ingest`);
-    xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`);
-
-    if (onProgress) {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
-      };
-    }
-    xhr.onload = () => {
-      if (xhr.status === 200 || xhr.status === 201) resolve(JSON.parse(xhr.responseText));
-      else reject(new Error(`Upload failed (${xhr.status})`));
-    };
-    xhr.onerror = () => reject(new Error("Cannot reach backend. Is Flask running?"));
-    xhr.send(formData);
-  });
-}
+// ─────────────────────────────────────────────────────────────
+// CALLS
+// ─────────────────────────────────────────────────────────────
 
 export async function getCalls(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${BASE}/calls${qs ? "?" + qs : ""}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`getCalls failed (${res.status})`);
-  return res.json();
+  return safeFetch(`${BASE}/calls${qs ? "?" + qs : ""}`, {
+    headers: authHeaders(),
+  });
 }
 
 export async function getCall(callId) {
-  const res = await fetch(`${BASE}/calls/${callId}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`getCall failed (${res.status})`);
-  return res.json();
+  return safeFetch(`${BASE}/calls/${callId}`, {
+    headers: authHeaders(),
+  });
 }
 
 export async function getDashboard(params = {}) {
   const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${BASE}/reports/dashboard${qs ? "?" + qs : ""}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`getDashboard failed (${res.status})`);
-  return res.json();
+  return safeFetch(`${BASE}/reports/dashboard${qs ? "?" + qs : ""}`, {
+    headers: authHeaders(),
+  });
 }
 
 export async function getAgentKPIs() {
-  const res = await fetch(`${BASE}/agents/kpis`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`getAgentKPIs failed (${res.status})`);
-  return res.json();
+  return safeFetch(`${BASE}/agents/kpis`, {
+    headers: authHeaders(),
+  });
 }
 
-// ── Export CSV ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// UPLOAD (XHR for progress)
+// ─────────────────────────────────────────────────────────────
+
+export function uploadCall(file, metadata = {}, onProgress) {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    Object.entries(metadata).forEach(([k, v]) => {
+      if (v) formData.append(k, v);
+    });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/calls/ingest`);
+
+    xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`);
+
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status === 200 || xhr.status === 201) {
+          resolve(data);
+        } else {
+          reject(new Error(data.error || `Upload failed (${xhr.status})`));
+        }
+      } catch {
+        reject(new Error("Invalid response from server"));
+      }
+    };
+
+    xhr.onerror = () => {
+      console.error("❌ XHR NETWORK ERROR");
+      reject(new Error("Network error / CORS issue"));
+    };
+
+    xhr.send(formData);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXPORT
+// ─────────────────────────────────────────────────────────────
+
 export function downloadCSVExport(params = {}) {
   const qs = new URLSearchParams(params).toString();
   const url = `${BASE}/reports/export${qs ? "?" + qs : ""}`;
-  // Create a link with auth header workaround — open in new tab
+
   const a = document.createElement("a");
   a.href = url;
-  a.download = `CARE_Export_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = `CARE_Export_${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
 }
 
-// ── Google Drive Sync ─────────────────────────────────────────────────────────
 export async function syncGDrive(folderIdOrUrl = null) {
-  const res = await fetch(`${BASE}/connectors/gdrive/sync`, {
+  return safeFetch(`${BASE}/connectors/gdrive/sync`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify(folderIdOrUrl ? { folder_id: folderIdOrUrl } : {}),
   });
-  if (!res.ok) throw new Error(`Drive sync failed (${res.status})`);
-  return res.json();
 }
 
 export async function saveGDriveConfig(folderUrl, autoSync = false) {
-  const res = await fetch(`${BASE}/connectors/gdrive/config`, {
+  return safeFetch(`${BASE}/connectors/gdrive/config`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ folder_url: folderUrl, auto_sync: autoSync }),
+    body: JSON.stringify({
+      folder_url: folderUrl,
+      auto_sync: autoSync,
+    }),
   });
-  if (!res.ok) throw new Error("Failed to save Drive config");
-  return res.json();
 }
 
-// ── S3 Ingest ─────────────────────────────────────────────────────────────────
 export async function ingestFromS3(s3Uri, metadata = {}) {
-  const res = await fetch(`${BASE}/calls/ingest-s3`, {
+  return safeFetch(`${BASE}/calls/ingest-s3`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ s3_uri: s3Uri, ...metadata }),
   });
-  if (!res.ok) throw new Error(`S3 ingest failed (${res.status})`);
-  return res.json();
 }
 
 export async function ingestFromUrl(url, metadata = {}) {
-  const res = await fetch(`${BASE}/calls/ingest-url`, {
+  return safeFetch(`${BASE}/calls/ingest-url`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ url, ...metadata }),
   });
-  if (!res.ok) throw new Error(`URL ingest failed (${res.status})`);
-  return res.json();
 }

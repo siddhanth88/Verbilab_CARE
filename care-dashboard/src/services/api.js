@@ -1,5 +1,4 @@
 // Uses VITE_API_URL env var in production, falls back to localhost for dev
-const API_ROOT = import.meta.env.VITE_API_URL;
 const API_ROOT = import.meta.env.VITE_API_URL || "https://verbilabcare-production.up.railway.app";
 if (!API_ROOT) {
   console.error("❌ VITE_API_URL is NOT set");

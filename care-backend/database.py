@@ -38,64 +38,8 @@ def init_db():
             created_at  TEXT DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS users (
-            id          TEXT PRIMARY KEY,
-            org_id      TEXT NOT NULL,
-            email       TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role        TEXT NOT NULL DEFAULT 'qa_manager',
-            name        TEXT,
-            is_active   INTEGER DEFAULT 1,
-            created_at  TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (org_id) REFERENCES organisations(id)
-        );
+        -- keep all your existing CREATE TABLE code here
 
-        CREATE TABLE IF NOT EXISTS calls (
-            id                  TEXT PRIMARY KEY,
-            org_id              TEXT NOT NULL,
-            filename            TEXT,
-            file_path           TEXT,
-            file_size           INTEGER,
-            agent_id            TEXT,
-            campaign_id         TEXT,
-            loan_id             TEXT,
-            customer_id         TEXT,
-            source              TEXT DEFAULT 'upload',
-            source_uri          TEXT,
-            status              TEXT DEFAULT 'queued',
-            score               INTEGER,
-            score_pct           INTEGER,
-            confidence_pct      INTEGER,
-            scores_breakdown    TEXT,
-            compliance_flags    TEXT,
-            ptp_detected        INTEGER DEFAULT 0,
-            ptp_amount          TEXT,
-            ptp_date            TEXT,
-            ptp_mode            TEXT,
-            agent_sentiment     TEXT,
-            sentiment_notes     TEXT,
-            summary             TEXT,
-            key_issues          TEXT,
-            strengths           TEXT,
-            coaching_tip        TEXT,
-            transcript          TEXT,
-            error               TEXT,
-            uploaded_at         TEXT DEFAULT (datetime('now')),
-            processed_at        TEXT,
-            FOREIGN KEY (org_id) REFERENCES organisations(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS drive_configs (
-            id          TEXT PRIMARY KEY,
-            org_id      TEXT NOT NULL UNIQUE,
-            folder_url  TEXT,
-            folder_id   TEXT,
-            last_synced TEXT,
-            auto_sync   INTEGER DEFAULT 0,
-            FOREIGN KEY (org_id) REFERENCES organisations(id)
-        );
-
-        -- Seed default org and admin
         INSERT OR IGNORE INTO organisations (id, name, slug)
         VALUES ('org_default', 'Company Finance', 'company-finance');
 
@@ -104,11 +48,21 @@ def init_db():
             'user_admin',
             'org_default',
             'admin@care.ai',
-            '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBpj2oBzMHy3iq',
+            'temp',
             'super_admin',
             'QA Manager'
         );
         """)
+
+        admin_hash = bcrypt.hashpw(
+            "care@2025".encode("utf-8"),
+            bcrypt.gensalt()
+        ).decode("utf-8")
+
+        conn.execute(
+            "UPDATE users SET password_hash=? WHERE email=?",
+            (admin_hash, "admin@care.ai")
+        )
     
     # Migrate existing database if needed
     try:

@@ -1,24 +1,19 @@
 import { useState } from "react";
 
-// ✅ CORRECT: Define API constant properly
-const API = import.meta.env.VITE_API_URL ||
+const API =
+  import.meta.env.VITE_API_URL ||
+  "https://verbilabcare-production.up.railway.app";
+
 export default function LoginPage({ onLogin }) {
   const [email, setEmail] = useState("admin@care.ai");
-  const [password, setPassword] = useState("care@2025");  // ✅ Default password filled
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-
-  // ✅ Log to verify API URL
-  console.log("https://verbilabcare-production.up.railway.app/", API);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError("");
-
-    console.log("Attempting login to:", `${API}/api/auth/login`);
-    console.log("Email:", email);
-    console.log("Password length:", password.length);
 
     try {
       const res = await fetch(`${API}/api/auth/login`, {
@@ -27,26 +22,19 @@ export default function LoginPage({ onLogin }) {
         body: JSON.stringify({ email, password }),
       });
 
-      console.log("Response status:", res.status);
-
       const data = await res.json();
-      console.log("Response data:", data);
 
       if (!res.ok) {
         setError(data.error || "Login failed");
         return;
       }
 
-      // ✅ Store in localStorage
       localStorage.setItem("care_token", data.token);
       localStorage.setItem("care_user", JSON.stringify(data.user));
-      
-      // ✅ Call parent component's onLogin
       onLogin(data.user);
-      
     } catch (err) {
-      console.error("Login error:", err);
-      setError("Cannot reach server. Check if backend is running at " + API);
+      console.error("Login failed:", err);
+      setError("Cannot reach server. Please check backend API.");
     } finally {
       setLoading(false);
     }
@@ -117,13 +105,6 @@ export default function LoginPage({ onLogin }) {
               <span className="text-gray-600 text-xs py-1.5">/</span>
               <span className="font-mono bg-gray-800 text-gray-300 text-xs px-3 py-1.5 rounded-lg">care@2025</span>
             </div>
-          </div>
-
-          {/* Show API URL for debugging */}
-          <div className="mt-4 text-center">
-            <p className="text-xs text-gray-600">
-              API: <span className="text-cyan-400">{API}</span>
-            </p>
           </div>
         </div>
 

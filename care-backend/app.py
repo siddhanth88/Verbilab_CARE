@@ -116,7 +116,6 @@ def login():
         return jsonify({"error": "Invalid credentials"}), 401
 
     if AUTH_AVAILABLE:
-
     print("LOGIN EMAIL:", email, flush=True)
     print("USER FOUND:", bool(user), flush=True)
     print("HASH:", user["password_hash"] if user else None, flush=True)
@@ -130,10 +129,10 @@ def login():
 
     if not check:
         return jsonify({"error": "Invalid credentials"}), 401
-    else:
-        # Fallback: plain text compare (dev only)
-        if password not in ["care@2025", user.get("password_hash", "")]:
-            return jsonify({"error": "Invalid credentials"}), 401
+else:
+    # Fallback: plain text compare (dev only)
+    if password not in ["care@2025", user.get("password_hash", "")]:
+        return jsonify({"error": "Invalid credentials"}), 401
 
     token = make_token(user)
     return jsonify({

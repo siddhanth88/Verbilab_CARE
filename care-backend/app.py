@@ -1,7 +1,7 @@
 """
-CARE Backend v4 — Flask
-========================
-- SQLite persistent database
+CARE Backend v4 — Flask + PostgreSQL
+======================================
+- PostgreSQL persistent database (AWS RDS)
 - JWT auth + multi-tenant RBAC
 - Google Drive sync
 - CSV export
@@ -17,13 +17,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-# Allow all origins — works for any frontend URL
 CORS(app, supports_credentials=True, origins="*")
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-ALLOWED_EXTENSIONS = {"mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "zip", "csv", "3gp", "opus", "webm"}
+ALLOWED_EXTENSIONS = {
+    "mp3", "wav", "m4a", "ogg", "flac", "aac", "wma",
+    "zip", "csv", "3gp", "opus", "webm"
+}
 
 # ── Import DB + processor ─────────────────────────────────────────────────────
 from database import (
@@ -44,25 +46,30 @@ try:
     AUTH_AVAILABLE = True
 except ImportError:
     AUTH_AVAILABLE = False
-    print("[AUTH] PyJWT/bcrypt not installed — auth disabled. Run: pip install pyjwt bcrypt")
+    print("[AUTH] PyJWT/bcrypt not installed — auth disabled.")
+
 
 def make_token(user: dict) -> str:
-    if not AUTH_AVAILABLE: return "no-auth"
+    if not AUTH_AVAILABLE:
+        return "no-auth"
     payload = {
         "sub": user["id"],
         "org": user["org_id"],
         "role": user["role"],
         "name": user.get("name", ""),
-        "exp": datetime.now(timezone.utc) + timedelta(hours=12)
+        "exp": datetime.now(timezone.utc) + timedelta(hours=12),
     }
     return pyjwt.encode(payload, SECRET, algorithm="HS256")
 
+
 def decode_token(token: str) -> dict | None:
-    if not AUTH_AVAILABLE: return {"sub": "user_admin", "org": "org_default", "role": "super_admin"}
+    if not AUTH_AVAILABLE:
+        return {"sub": "user_admin", "org": "org_default", "role": "super_admin"}
     try:
         return pyjwt.decode(token, SECRET, algorithms=["HS256"])
     except Exception:
         return None
+
 
 def get_current_user():
     auth = request.headers.get("Authorization", "")
@@ -70,6 +77,7 @@ def get_current_user():
     if not token:
         return None
     return decode_token(token)
+
 
 def require_auth(fn):
     from functools import wraps
@@ -82,19 +90,17 @@ def require_auth(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+
 def get_org_id():
     user = get_current_user()
     return user["org"] if user else "org_default"
 
-def _update_call_fn(call_id, fields):
-    update_call(call_id, fields)
 
 def allowed_file(filename):
     if not filename:
         return False
-    # Accept any audio file or no extension (some recorders don't add extensions)
     if "." not in filename:
-        return True  # allow extensionless files
+        return True
     ext = filename.rsplit(".", 1)[1].lower()
     return ext in ALLOWED_EXTENSIONS
 
@@ -108,6 +114,7 @@ def login():
     body = request.get_json() or {}
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
+
     if not email or not password:
         return jsonify({"error": "Email and password required"}), 400
 
@@ -115,30 +122,38 @@ def login():
     if not user:
         return jsonify({"error": "Invalid credentials"}), 401
 
+    print(f"[LOGIN] email={email} | user_found=True | auth_available={AUTH_AVAILABLE}", flush=True)
+
     if AUTH_AVAILABLE:
-    print("LOGIN EMAIL:", email, flush=True)
-    print("USER FOUND:", bool(user), flush=True)
-    print("HASH:", user["password_hash"] if user else None, flush=True)
+        # bcrypt check
+        try:
+            check = bcrypt.checkpw(
+                password.encode("utf-8"),
+                user["password_hash"].encode("utf-8"),
+            )
+        except Exception as e:
+            print(f"[LOGIN] bcrypt error: {e}", flush=True)
+            return jsonify({"error": "Auth error"}), 500
 
-    check = bcrypt.checkpw(
-        password.encode(),
-        user["password_hash"].encode()
-    )
+        print(f"[LOGIN] bcrypt check={check}", flush=True)
 
-    print("CHECK:", check, flush=True)
-
-    if not check:
-        return jsonify({"error": "Invalid credentials"}), 401
-else:
-    # Fallback: plain text compare (dev only)
-    if password not in ["care@2025", user.get("password_hash", "")]:
-        return jsonify({"error": "Invalid credentials"}), 401
+        if not check:
+            return jsonify({"error": "Invalid credentials"}), 401
+    else:
+        # Dev fallback — plain text
+        if password != user.get("password_hash", ""):
+            return jsonify({"error": "Invalid credentials"}), 401
 
     token = make_token(user)
     return jsonify({
         "token": token,
-        "user": {"id": user["id"], "email": user["email"],
-                 "name": user["name"], "role": user["role"], "org_id": user["org_id"]}
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user["role"],
+            "org_id": user["org_id"],
+        },
     })
 
 
@@ -146,9 +161,12 @@ else:
 @require_auth
 def me():
     u = get_user_by_id(request.user["sub"])
-    if not u: return jsonify({"error": "User not found"}), 404
-    return jsonify({"id": u["id"], "email": u["email"], "name": u["name"],
-                    "role": u["role"], "org_id": u["org_id"]})
+    if not u:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({
+        "id": u["id"], "email": u["email"],
+        "name": u["name"], "role": u["role"], "org_id": u["org_id"],
+    })
 
 
 @app.route("/api/auth/register", methods=["POST"])
@@ -164,7 +182,10 @@ def register():
     name = body.get("name", "")
     if not email or not password:
         return jsonify({"error": "email and password required"}), 400
-    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if AUTH_AVAILABLE else password
+    pw_hash = (
+        bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        if AUTH_AVAILABLE else password
+    )
     uid = f"user_{uuid.uuid4().hex[:8]}"
     create_user(uid, request.user["org"], email, pw_hash, role, name)
     return jsonify({"id": uid, "email": email, "role": role}), 201
@@ -176,8 +197,11 @@ def register():
 
 @app.route("/api/health")
 def health():
-    calls = list_calls(limit=1)
-    return jsonify({"status": "ok", "db": "sqlite", "sarvam": bool(os.getenv("SARVAM_API_KEY"))})
+    return jsonify({
+        "status": "ok",
+        "db": "postgresql",
+        "sarvam": bool(os.getenv("SARVAM_API_KEY")),
+    })
 
 
 # ════════════════════════════════════════════════════════
@@ -189,19 +213,15 @@ def ingest_call():
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
     file = request.files["file"]
-
-    # Accept all files — be permissive for demo
     filename = file.filename or "recording.mp3"
-
     call_id = f"CALL-{uuid.uuid4().hex[:8].upper()}"
-    # Sanitize filename
     safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename)
     save_path = os.path.join(UPLOAD_FOLDER, f"{call_id}_{safe_name}")
 
     try:
         file.save(save_path)
     except Exception as e:
-        return jsonify({"error": f"Failed to save file: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to save file: {e}"}), 500
 
     if not os.path.exists(save_path) or os.path.getsize(save_path) == 0:
         return jsonify({"error": "File save failed — empty file"}), 500
@@ -275,14 +295,13 @@ def save_gdrive_config():
     body = request.get_json() or {}
     folder_url = body.get("folder_url", "")
     auto_sync = body.get("auto_sync", False)
-    # Extract folder ID from URL
     folder_id = ""
     if "/folders/" in folder_url:
         folder_id = folder_url.split("/folders/")[1].split("?")[0].split("/")[0]
     elif "id=" in folder_url:
         folder_id = folder_url.split("id=")[1].split("&")[0]
     else:
-        folder_id = folder_url  # assume raw ID
+        folder_id = folder_url
     save_drive_config(request.user["org"], folder_url, folder_id, auto_sync)
     return jsonify({"folder_id": folder_id, "auto_sync": auto_sync})
 
@@ -290,48 +309,36 @@ def save_gdrive_config():
 @app.route("/api/v1/connectors/gdrive/sync", methods=["GET", "POST"])
 @require_auth
 def sync_gdrive():
-    """
-    Pull audio files from a configured Google Drive folder.
-    Lists all .mp3/.wav/.m4a files and queues each for processing.
-    Uses direct download URL (files must be shared 'Anyone with link').
-    """
     import requests as req
-
     org_id = request.user["org"]
     cfg = get_drive_config(org_id)
-
-    # Allow passing folder_id directly in request
     body = request.get_json() or {}
     folder_id = body.get("folder_id") or (cfg["folder_id"] if cfg else None)
 
     if not folder_id:
-        return jsonify({"error": "No Google Drive folder configured. POST to /api/v1/connectors/gdrive/config first."}), 400
+        return jsonify({"error": "No Google Drive folder configured."}), 400
 
-    # Use Google Drive API public endpoint (no OAuth needed for shared folders)
-    api_url = (
-        f"https://www.googleapis.com/drive/v3/files"
-        f"?q='{folder_id}'+in+parents+and+(mimeType='audio/mpeg'+or+mimeType='audio/wav'+or+mimeType='audio/x-m4a')"
-        f"&fields=files(id,name,size,mimeType,modifiedTime)"
-        f"&key={os.getenv('GOOGLE_API_KEY','')}"
-    )
-
-    # If no API key, fall back to direct URL processing
     if not os.getenv("GOOGLE_API_KEY"):
         return jsonify({
-            "message": "To auto-list Drive files, set GOOGLE_API_KEY in .env. Alternatively, use /api/v1/calls/ingest-url with individual Drive file links.",
+            "message": "Set GOOGLE_API_KEY to auto-list Drive files. Or use /api/v1/calls/ingest-url.",
             "manual_url_endpoint": "POST /api/v1/calls/ingest-url",
-            "example": {"url": f"https://drive.google.com/uc?export=download&id=FILE_ID&confirm=t"}
+            "example": {"url": "https://drive.google.com/uc?export=download&id=FILE_ID&confirm=t"},
         }), 200
 
+    api_url = (
+        f"https://www.googleapis.com/drive/v3/files"
+        f"?q='{folder_id}'+in+parents"
+        f"+and+(mimeType='audio/mpeg'+or+mimeType='audio/wav'+or+mimeType='audio/x-m4a')"
+        f"&fields=files(id,name,size,mimeType,modifiedTime)"
+        f"&key={os.getenv('GOOGLE_API_KEY')}"
+    )
     r = req.get(api_url, timeout=30)
     if r.status_code != 200:
         return jsonify({"error": f"Drive API error: {r.text[:200]}"}), 400
 
     files = r.json().get("files", [])
     queued = []
-
     for f in files:
-        # Build direct download URL
         dl_url = f"https://drive.google.com/uc?export=download&id={f['id']}&confirm=t"
         call_id = f"CALL-{uuid.uuid4().hex[:8].upper()}"
         record = {
@@ -370,7 +377,8 @@ def list_calls_route():
 @app.route("/api/v1/calls/<call_id>", methods=["GET"])
 def get_call_route(call_id):
     call = get_call(call_id)
-    if not call: return jsonify({"error": "Not found"}), 404
+    if not call:
+        return jsonify({"error": "Not found"}), 404
     return jsonify(call)
 
 
@@ -386,19 +394,24 @@ def dashboard():
     today = datetime.now(timezone.utc).date().isoformat()
 
     all_calls = list_calls(org_id=org_id, date_from=date_from, date_to=date_to, limit=1000)
-    calls_today = [c for c in list_calls(org_id=org_id, limit=1000) if c.get("uploaded_at","").startswith(today)]
+    calls_today = [c for c in list_calls(org_id=org_id, limit=1000)
+                   if c.get("uploaded_at", "").startswith(today)]
     processed = [c for c in all_calls if c["status"] == "processed"]
-    pct = round(len(processed)/len(all_calls)*100) if all_calls else 0
+    pct = round(len(processed) / len(all_calls) * 100) if all_calls else 0
     flagged = [c for c in processed if c.get("compliance_flags")]
 
     return jsonify({
         "calls_today": len(calls_today),
         "processed": len(processed),
         "processing_pct": pct,
-        "live_calls": len([c for c in all_calls if c["status"] in {"transcribing","scoring","queued"}]),
+        "live_calls": len([c for c in all_calls if c["status"] in {"transcribing", "scoring", "queued"}]),
         "compliance_flags": len(flagged),
-        "avg_score": round(sum(c["score"] for c in processed if c.get("score")) / len(processed), 1) if processed else 0,
-        "ptp_rate": round(len([c for c in processed if c.get("ptp_detected")])/len(processed)*100) if processed else 0,
+        "avg_score": round(
+            sum(c["score"] for c in processed if c.get("score")) / len(processed), 1
+        ) if processed else 0,
+        "ptp_rate": round(
+            len([c for c in processed if c.get("ptp_detected")]) / len(processed) * 100
+        ) if processed else 0,
         "ingestion": {"direct": len(calls_today), "google_drive": 0, "dialer_webhook": 0},
         "recent_calls": all_calls[:20],
     })
@@ -406,13 +419,12 @@ def dashboard():
 
 @app.route("/api/v1/reports/export", methods=["GET"])
 def export_csv():
-    """Download all processed calls as CSV."""
     org_id = get_org_id()
     calls = list_calls(
         org_id=org_id,
         date_from=request.args.get("from"),
         date_to=request.args.get("to"),
-        limit=10000
+        limit=10000,
     )
     processed = [c for c in calls if c["status"] == "processed"]
     csv_bytes = export_calls_to_csv_bytes(processed)
@@ -421,7 +433,7 @@ def export_csv():
         io.BytesIO(csv_bytes),
         mimetype="text/csv",
         as_attachment=True,
-        download_name=f"CARE_Export_{date_str}.csv"
+        download_name=f"CARE_Export_{date_str}.csv",
     )
 
 
@@ -436,33 +448,26 @@ def agent_kpis():
             agents[aid] = {"agent_id": aid, "calls": 0, "total_score": 0, "ptps": 0, "flags": 0}
         agents[aid]["calls"] += 1
         agents[aid]["total_score"] += c.get("score") or 0
-        if c.get("ptp_detected"): agents[aid]["ptps"] += 1
+        if c.get("ptp_detected"):
+            agents[aid]["ptps"] += 1
         agents[aid]["flags"] += len(c.get("compliance_flags") or [])
     result = []
     for a in agents.values():
-        a["avg_score"] = round(a["total_score"]/a["calls"], 1) if a["calls"] else 0
-        a["ptp_rate"] = round(a["ptps"]/a["calls"]*100) if a["calls"] else 0
+        a["avg_score"] = round(a["total_score"] / a["calls"], 1) if a["calls"] else 0
+        a["ptp_rate"] = round(a["ptps"] / a["calls"] * 100) if a["calls"] else 0
         result.append(a)
     return jsonify({"agents": sorted(result, key=lambda x: x["avg_score"], reverse=True)})
 
 
 # ════════════════════════════════════════════════════════
-if __name__ == "__main__":
-    print("🎯 CARE Backend v4")
-    print(f"   DB      : {os.path.join(os.path.dirname(__file__), 'care.db')}")
-    print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
-    print(f"   Auth    : {'JWT enabled' if AUTH_AVAILABLE else 'disabled (pip install pyjwt bcrypt)'}")
-    print(f"   Health  : http://localhost:5000/api/health\n")
-    app.run(debug=True, port=5000, threaded=True)
-
-
+#  ENTRY POINT
 # ════════════════════════════════════════════════════════
-# Entry point
-# ════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_ENV", "production") == "development"
-    print("🎯 CARE Backend v4")
+    print("🎯 CARE Backend v4 — PostgreSQL")
     print(f"   Port    : {port}")
     print(f"   Sarvam  : {'✓ set' if os.getenv('SARVAM_API_KEY') else '✗ MISSING'}")
+    print(f"   Auth    : {'JWT enabled' if AUTH_AVAILABLE else 'disabled'}")
     app.run(debug=debug, port=port, threaded=True)

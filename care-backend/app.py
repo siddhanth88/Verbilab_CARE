@@ -35,7 +35,11 @@ from database import (
 )
 from processor import process_call_async, export_calls_to_csv_bytes
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    print(f"[DB] WARNING: init_db() failed at startup: {e}", flush=True)
+    print("[DB] The app will continue, but database operations may fail until connectivity is restored.", flush=True)
 
 # ── JWT Auth ──────────────────────────────────────────────────────────────────
 SECRET = os.getenv("JWT_SECRET", "care-secret-change-in-prod")

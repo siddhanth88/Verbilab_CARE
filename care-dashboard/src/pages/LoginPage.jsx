@@ -1,6 +1,9 @@
 import { useState } from "react";
 
-console.log("API URL =", API);
+const API =
+  import.meta.env.VITE_API_URL ||
+  "https://verbilabcare-production.up.railway.app";
+  console.log("API URL =", API);
 
 export default function LoginPage({ onLogin }) {
   const [email, setEmail] = useState("admin@care.ai");
